@@ -1,16 +1,16 @@
 ---
-abstract: 'perl bind for Qless job queueing system'
+abstract: unknown
 author:
-  - 'qless, qless-py and qless-core - SEOmoz'
+  - 'Anatoliy Lapitskiy <nuclon@cpan.org>'
 build_requires:
-  ExtUtils::MakeMaker: 6.36
+  ExtUtils::MakeMaker: 6.59
   Test::Class: 0
   Test::More: 0
 configure_requires:
-  ExtUtils::MakeMaker: 6.36
+  ExtUtils::MakeMaker: 6.59
 dynamic_config: 0
 generated_by: 'Module::Install version 1.06, CPAN::Meta::Converter version 2.120921'
-license: unknown
+license: artistic_2
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
   version: 1.4
@@ -26,4 +26,5 @@ requires:
   JSON::XS: 0
   Redis: 0
   Time::HiRes: 0
-version: 0.02
+  perl: 5.006
+version: 0.04
