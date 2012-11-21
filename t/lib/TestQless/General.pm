@@ -2,6 +2,7 @@ package TestQless::General;
 use base qw(TestQless);
 use Test::More;
 use Data::Dumper;
+use List::Util;
 
 sub test_config : Tests(5) {
 	my $self = shift;
@@ -63,12 +64,12 @@ sub test_push_peek_pop_many : Tests(6) {
 	is $self->{'q'}->length, scalar @jids, 'Inserting should increase the size of the queue';
 
 	# Alright, they're in the queue. Let's take a peek
-	is scalar @{ $self->{'q'}->peek(7) }, 7;
-	is scalar @{ $self->{'q'}->peek(10) }, 10;
+	is scalar $self->{'q'}->peek(7), 7;
+	is scalar $self->{'q'}->peek(10), 10;
 
 	# Now let's pop them all off one by one
-	is scalar @{ $self->{'q'}->pop(7) }, 7;
-	is scalar @{ $self->{'q'}->pop(10) }, 3;
+	is scalar $self->{'q'}->pop(7), 7;
+	is scalar $self->{'q'}->pop(10), 3;
 }
 
 
@@ -443,4 +444,386 @@ sub test_locks_workers : Tests(5) {
 }
 
 
+# In this test, we want to make sure that we can corretly
+# cancel a job
+#   1) Put a job
+#   2) Cancel a job
+#   3) Ensure that it's no longer in the queue
+#   4) Ensure that we can't get data for it
+sub test_cancel : Tests(4) {
+	my $self = shift;
+	is $self->{'q'}->length, 0, 'Starting with empty queue';
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'cancel'});
+	my $job = $self->{'client'}->jobs($jid);
+
+	is $self->{'q'}->length, 1;
+	$job->cancel;
+	is $self->{'q'}->length, 0;
+	is $self->{'client'}->jobs($jid), undef;
+}
+
+
+
+# In this test, we want to make sure that when we cancel
+# a job, that heartbeats fail, as do completion attempts
+#   1) Put a job
+#   2) Pop that job
+#   3) Cancel that job
+#   4) Ensure that it's no longer in the queue
+#   5) Heartbeats fail, Complete fails
+#   6) Ensure that we can't get data for it
+sub test_cancel_heartbeat : Tests(5) {
+	my $self = shift;
+	is $self->{'q'}->length, 0, 'Starting with empty queue';
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'cancel_heartbeat'});
+	my $job = $self->{'q'}->pop;
+	$job->cancel;
+	is $self->{'q'}->length, 0;
+	ok !$job->heartbeat;
+	ok !$job->complete;
+	is $self->{'client'}->jobs($jid), undef;
+}
+
+
+# In this test, we want to make sure that if we fail a job
+# and then we cancel it, then we want to make sure that when
+# we ask for what jobs failed, we shouldn't see this one
+#   1) Put a job
+#   2) Fail that job
+#   3) Make sure we see failure stats
+#   4) Cancel that job
+#   5) Make sure that we don't see failure stats
+sub test_cancel_fail : Tests(2) {
+	my $self = shift;
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'cancel_fail'});
+	my $job = $self->{'q'}->pop;
+	$job->fail('foo', 'some message');
+	is_deeply $self->{'client'}->jobs->failed, { 'foo' => 1 };
+	$job->cancel;
+	is_deeply $self->{'client'}->jobs->failed, {};
+}
+
+
+# In this test, we want to make sure that a job that has been
+# completed and not simultaneously enqueued are correctly 
+# marked as completed. It should have a complete history, and
+# have the correct state, no worker, and no queue
+#   1) Put an item in a queue
+#   2) Pop said item from the queue
+#   3) Complete that job
+#   4) Get the data on that job, check state
+sub test_complete : Tests(10) {
+	my $self = shift;
+	is $self->{'q'}->length, 0, 'Starting with empty queue';
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'complete'});
+	my $job = $self->{'q'}->pop;
+	ok $job;
+	is $job->complete, 'complete';
+	$job = $self->{'client'}->jobs($jid);
+	is $job->history->[0]->{'done'}, time;
+	is $job->state, 'complete';
+	is $job->worker_name, '';
+	is $job->queue_name, '';
+	is $self->{'q'}->length, 0;
+	is_deeply $self->{'client'}->jobs->complete, [$jid];
+
+	# Now, if we move job back into a queue, we shouldn't see any
+	# completed jobs anymore
+	$job->move('testing');
+	is_deeply $self->{'client'}->jobs->complete, [];
+}
+
+
+
+# In this test, we want to make sure that a job that has been
+# completed and simultaneously enqueued has the correct markings.
+# It shouldn't have a worker, its history should be updated,
+# and the next-named queue should have that item.
+#   1) Put an item in a queue
+#   2) Pop said item from the queue
+#   3) Complete that job, re-enqueueing it
+#   4) Get the data on that job, check state
+#   5) Ensure that there is a work item in that queue
+sub test_complete_advance : Tests(11) {
+	my $self = shift;
+	is $self->{'q'}->length, 0, 'Starting with empty queue';
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'complete_advance'});
+	my $job = $self->{'q'}->pop;
+	ok $job;
+	is $job->complete('testing'), 'waiting';
+	$job = $self->{'client'}->jobs($jid);
+	is scalar @{ $job->history }, 2;
+	is $job->history->[0]->{'done'}, time;
+	is $job->history->[1]->{'put'}, time;
+	is $job->state, 'waiting';
+	is $job->worker_name, '';
+	is $job->queue_name, 'testing';
+	is $job->queue->name, 'testing';
+	is $self->{'q'}->length, 1;
+}
+
+
+# In this test, we want to make sure that a job that has been
+# handed out to a second worker can both be completed by the
+# second worker, and not completed by the first.
+#   1) Hand a job out to one worker, expire
+#   2) Hand a job out to a second worker
+#   3) First worker tries to complete it, should fail
+#   4) Second worker tries to complete it, should succeed
+sub test_complete_fail : Tests(9) {
+	my $self = shift;
+	is $self->{'q'}->length, 0, 'Starting with empty queue';
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'complete_fail'});
+	$self->{'client'}->config->set('heartbeat', -10);
+	my $ajob = $self->{'a'}->pop;
+	ok $ajob;
+	my $bjob = $self->{'b'}->pop;
+	ok $bjob;
+
+	is $ajob->complete, undef;
+	is $bjob->complete, 'complete';
+
+	my $job = $self->{'client'}->jobs($jid);
+	is $job->state, 'complete';
+	is $job->worker_name, '';
+	is $job->queue_name, '';
+	is $self->{'q'}->length, 0;
+}
+
+
+# In this test, we want to make sure that if we try to complete
+# a job that's in anything but the 'running' state.
+#   1) Put an item in a queue
+#   2) DO NOT pop that item from the queue
+#   3) Attempt to complete the job, ensure it fails
+sub test_complete_state : Tests(2) {
+	my $self = shift;
+	is $self->{'q'}->length, 0, 'Starting with empty queue';
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'complete_state'});
+	my $job = $self->{'client'}->jobs($jid);
+	is $job->complete('testing'), undef;
+}
+
+
+
+# In this test, we want to make sure that if we complete a job and
+# advance it, that the new queue always shows up in the 'queues'
+# endpoint.
+#   1) Put an item in a queue
+#   2) Complete it, advancing it to a different queue
+#   3) Ensure it appears in 'queues'
+sub test_complete_queues : Tests(3) {
+	my $self = shift;
+	is $self->{'q'}->length, 0, 'Starting with empty queue';
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'complete_queues'});
+
+	is scalar (grep { $_->{'name'} eq 'other' } @{ $self->{'client'}->queues->counts }), 0;
+	$self->{'q'}->pop->complete('other');
+	is scalar (grep { $_->{'name'} eq 'other' } @{ $self->{'client'}->queues->counts }), 1;
+}
+
+
+
+# In this test, we want to make sure that we honor our job
+# expiration, in the sense that when jobs are completed, we 
+# then delete all the jobs that should be expired according
+# to our deletion criteria
+#   1) First, set jobs-history-count to 10
+#   2) Then, insert 20 jobs
+#   3) Pop each of these jobs
+#   4) Complete each of these jobs
+#   5) Ensure that we have data about 10 jobs
+sub test_job_count_expiration : Tests(2) {
+	my $self = shift;
+	$self->{'client'}->config->set('jobs-history-count', 10);
+	my @jids = map { $self->{'q'}->put('Qless::Job', { 'test' => 'job_count_expiration', count => $_ }) } 0..19;
+	foreach (@jids) {
+		$self->{'q'}->pop->complete;
+	}
+
+	is $self->{'redis'}->zcard('ql:completed'), 10;
+	is scalar ($self->{'redis'}->keys('ql:j:*')), 10;
+}
+
+
+# In this test, we're going to make sure that statistics are
+# correctly collected about how long items wait in a queue
+#   1) Ensure there are no wait stats currently
+#   2) Add a bunch of jobs to a queue
+#   3) Pop a bunch of jobs from that queue, faking out the times
+#   4) Ensure that there are now correct wait stats
+sub test_stats_waiting : Tests(29) {
+	my $self = shift;
+	my $stats = $self->{'q'}->stats;
+	is $stats->{'wait'}->{'count'}, 0;
+	is $stats->{'run'}->{'count'}, 0;
+
+	$self->time_freeze;
+	my @jids = map { $self->{'q'}->put('Qless::Job', { 'test' => 'stats_waiting', count => $_ }) } 0..19;
+	is scalar @jids, 20;
+	foreach (@jids) {
+		ok $self->{'q'}->pop;
+		$self->time_advance(1);
+	}
+	$self->time_unfreeze;
+
+	# Now, make sure that we see stats for the waiting
+	$stats = $self->{'q'}->stats;
+	is $stats->{'wait'}->{'count'}, 20;
+	is $stats->{'wait'}->{'mean'}, 9.5;
+	# This is our expected standard deviation
+	ok $stats->{'wait'}->{'std'} - 5.916079783099 < 1e-8;
+	# Now make sure that our histogram looks like what we think it
+	# should
+	is_deeply [ @{ $stats->{'wait'}->{'histogram'} }[0..19] ], [ (1)x20 ];
+	is List::Util::sum(@{ $stats->{'run'}->{'histogram'} }), $stats->{'run'}->{'count'};
+	is List::Util::sum(@{ $stats->{'wait'}->{'histogram'} }), $stats->{'wait'}->{'count'};
+}
+
+
+# In this test, we want to make sure that statistics are
+# correctly collected about how long items take to actually 
+# get processed.
+#   1) Ensure there are no run stats currently
+#   2) Add a bunch of jobs to a queue
+#   3) Pop those jobs
+#   4) Complete those jobs, faking out the time
+#   5) Ensure that there are now correct run stats
+sub test_stats_complete : Tests(9) {
+	my $self = shift;
+	my $stats = $self->{'q'}->stats;
+	is $stats->{'wait'}->{'count'}, 0;
+	is $stats->{'run'}->{'count'}, 0;
+
+	$self->time_freeze;
+	my @jids = map { $self->{'q'}->put('Qless::Job', { 'test' => 'stats_waiting', count => $_ }) } 0..19;
+	my @jobs = $self->{'q'}->pop(20);
+	is scalar @jobs, 20;
+	foreach my $job (@jobs) {
+		$job->complete;
+		$self->time_advance(1);
+	}
+	$self->time_unfreeze;
+
+	$stats = $self->{'q'}->stats;
+	is $stats->{'run'}->{'count'}, 20;
+	is $stats->{'run'}->{'mean'}, 9.5;
+	ok $stats->{'run'}->{'std'} - 5.916079783099 < 1e-8;
+	is_deeply [ @{ $stats->{'run'}->{'histogram'} }[0..19] ], [ (1)x20 ];
+	is List::Util::sum(@{ $stats->{'run'}->{'histogram'} }), $stats->{'run'}->{'count'};
+	is List::Util::sum(@{ $stats->{'wait'}->{'histogram'} }), $stats->{'wait'}->{'count'};
+}
+
+
+# In this test, we want to make sure that the queues function
+# can correctly identify the numbers associated with that queue
+#   1) Make sure we get nothing for no queues
+#   2) Put delayed item, check
+#   3) Put item, check
+#   4) Put, pop item, check
+#   5) Put, pop, lost item, check
+sub test_queues : Tests(10) {
+	my $self = shift;
+	is $self->{'q'}->length, 0, 'Starting with empty queue';
+	is_deeply $self->{'client'}->queues->counts, {};
+	# Now, let's actually add an item to a queue, but scheduled
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'queues'}, delay => 10);
+	my $expected = {
+		'name'      => 'testing',
+		'stalled'   => 0,
+		'waiting'   => 0,
+		'running'   => 0,
+		'scheduled' => 1,
+		'depends'   =>  0,
+		'recurring' => 0
+	};
+	is_deeply $self->{'client'}->queues->counts, [$expected];
+	is_deeply $self->{'client'}->queues('testing')->counts, $expected;
+
+	$self->{'q'}->put('Qless::Job', {'test'=>'queues'});
+	$expected->{'waiting'} += 1;
+	is_deeply $self->{'client'}->queues->counts, [$expected];
+	is_deeply $self->{'client'}->queues('testing')->counts, $expected;
+
+	my $job = $self->{'q'}->pop;
+	$expected->{'waiting'} -= 1;
+	$expected->{'running'} += 1;
+	is_deeply $self->{'client'}->queues->counts, [$expected];
+	is_deeply $self->{'client'}->queues('testing')->counts, $expected;
+
+	# Now we'll have to mess up our heartbeat to make this work
+	$self->{'q'}->put('Qless::Job', {'test'=>'queues'});
+	$self->{'client'}->config->set('heartbeat', -10);
+	$job = $self->{'q'}->pop;
+	$expected->{'stalled'} += 1;
+	is_deeply $self->{'client'}->queues->counts, [$expected];
+	is_deeply $self->{'client'}->queues('testing')->counts, $expected;
+}
+
+
+
+# In this test, we want to make sure that tracking works as expected.
+#   1) Check tracked jobs, expect none
+#   2) Put, Track a job, check
+#   3) Untrack job, check
+#   4) Track job, cancel, check
+sub test_track : Tests(4) {
+	my $self = shift;
+
+	is_deeply $self->{'client'}->jobs->tracked, { expired => {}, jobs => [] };
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'track'});
+	my $job = $self->{'client'}->jobs($jid);
+	$job->track;
+	
+	is scalar @{ $self->{'client'}->jobs->tracked->{'jobs'} }, 1;
+	$job->untrack;
+	is scalar @{ $self->{'client'}->jobs->tracked->{'jobs'} }, 0;
+
+	$job->track;
+	$job->cancel;
+	is scalar @{ $self->{'client'}->jobs->tracked->{'expired'} }, 1;
+}
+
+
+# When peeked, popped, failed, etc., qless should know when a 
+# job is tracked or not
+# => 1) Put a job, track it
+# => 2) Peek, ensure tracked
+# => 3) Pop, ensure tracked
+# => 4) Fail, check failed, ensure tracked
+sub test_track_tracked : Tests(3) {
+	my $self = shift;
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'track'});
+	my $job = $self->{'client'}->jobs($jid);
+	$job->track;
+	is $self->{'q'}->peek->tracked, 1;
+
+	$job = $self->{'q'}->pop;
+	is $job->tracked, 1;
+
+	$job->fail('foo', 'bar');
+	is $self->{'client'}->jobs->failed('foo')->{'jobs'}->[0]->tracked, 1;
+}
+
+
+# When peeked, popped, failed, etc., qless should know when a 
+# job is not tracked
+# => 1) Put a job
+# => 2) Peek, ensure not tracked
+# => 3) Pop, ensure not tracked
+# => 4) Fail, check failed, ensure not tracked
+sub test_track_untracked : Tests(3) {
+	my $self = shift;
+	my $jid = $self->{'q'}->put('Qless::Job', {'test'=>'track'});
+	my $job = $self->{'client'}->jobs($jid);
+	is $self->{'q'}->peek->tracked, 0;
+
+	$job = $self->{'q'}->pop;
+	is $job->tracked, 0;
+
+	$job->fail('foo', 'bar');
+	is $self->{'client'}->jobs->failed('foo')->{'jobs'}->[0]->tracked, 0;
+}
 1;
+
+
