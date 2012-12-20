@@ -93,7 +93,19 @@ sub put {
 =head2 C<recur>
 =cut
 sub recur {
-	my ($self, $klass, $data, $interval, %args) = @_;
+	my ($self, $klass, $data, @args) = @_;
+
+	my $interval;
+	my %args;
+
+	if (scalar(@args)%2) {
+		$interval = shift @args;
+		%args = @args;
+	}
+	else {
+		%args = @args;
+		$interval = $args{'interval'};
+	}
 
 	return $self->{'client'}->_recur([], 'on', $self->{'name'},
 		$args{'jid'} || $self->generate_jid($data),

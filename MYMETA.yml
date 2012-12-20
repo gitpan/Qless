@@ -1,25 +1,26 @@
 ---
-abstract: unknown
+abstract: ~
 author:
   - 'Anatoliy Lapitskiy <nuclon@cpan.org>'
 build_requires:
   ExtUtils::MakeMaker: 6.59
   Test::Class: 0
+  Test::Deep: 0
   Test::More: 0
 configure_requires:
-  ExtUtils::MakeMaker: 6.59
+  ExtUtils::MakeMaker: 0
+distribution_type: module
 dynamic_config: 0
-generated_by: 'Module::Install version 1.06, CPAN::Meta::Converter version 2.120921'
-license: artistic_2
+generated_by: 'ExtUtils::MakeMaker version 6.57_05'
+license: artistic2
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
   version: 1.4
 name: Qless
 no_index:
   directory:
-    - inc
-    - share
     - t
+    - inc
 requires:
   Class::Load: 0
   Daemon::Generic: 0
@@ -28,4 +29,4 @@ requires:
   Redis: 0
   Time::HiRes: 0
   perl: 5.006
-version: 0.05
+version: 0.06
